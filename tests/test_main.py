@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -185,6 +187,71 @@ class OcrTextTests(unittest.TestCase):
             )
 
         set_position.assert_called_once_with(456, -1140, 210, 500, 620, 0x0014)
+
+    def test_main_window_release_persists_position_on_second_monitor(self) -> None:
+        root = SimpleNamespace(winfo_id=lambda: 456)
+        app = SimpleNamespace(root=root, status_var=SimpleNamespace(set=Mock()))
+        second_monitor_bounds = (-1280, 100, -780, 720)
+        with (
+            patch.object(main, "get_native_toplevel_handle", return_value=456),
+            patch.object(
+                main,
+                "get_native_window_bounds",
+                return_value=second_monitor_bounds,
+            ),
+            patch.object(main, "save_window_position") as save_position,
+        ):
+            main.ScreenTranslator._finish_window_drag(
+                app,
+                SimpleNamespace(),
+            )
+
+        save_position.assert_called_once_with(
+            main.WINDOW_POSITION_PATH,
+            -1280,
+            100,
+        )
+        self.assertIsNone(app._panel_drag_origin)
+
+    def test_saved_panel_position_round_trips_negative_monitor_coordinates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ScreenTranslator" / "window.json"
+            main.save_window_position(path, -1280, 100)
+
+            self.assertEqual(main.load_saved_window_position(path), (-1280, 100))
+
+    def test_saved_panel_position_is_clamped_to_nearest_available_monitor(self) -> None:
+        monitors = [
+            {"left": -1280, "top": 100, "width": 1280, "height": 900},
+            {"left": 0, "top": 0, "width": 1920, "height": 1080},
+        ]
+
+        self.assertEqual(
+            main.clamp_window_position_to_monitors(
+                -1500,
+                100,
+                500,
+                620,
+                monitors,
+            ),
+            (-1280, 100),
+        )
+
+    def test_saved_panel_position_moves_when_its_monitor_is_disconnected(self) -> None:
+        monitors = [
+            {"left": 0, "top": 0, "width": 1920, "height": 1080},
+        ]
+
+        self.assertEqual(
+            main.clamp_window_position_to_monitors(
+                -1280,
+                100,
+                500,
+                620,
+                monitors,
+            ),
+            (0, 100),
+        )
 
     def test_cuda_detection_rejects_ct2_device_without_torch_cuda_runtime(self) -> None:
         ctranslate2 = SimpleNamespace(get_cuda_device_count=Mock(return_value=1))

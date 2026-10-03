@@ -127,6 +127,9 @@ ACTIVE_WINDOW_SOURCE = "Активное окно"
 REGION_SETTINGS_PATH = (
     Path(os.environ.get("APPDATA", Path.home())) / "ScreenTranslator" / "region.json"
 )
+WINDOW_POSITION_PATH = (
+    Path(os.environ.get("APPDATA", Path.home())) / "ScreenTranslator" / "window.json"
+)
 CUDA_DLL_HANDLES: list[Any] = []
 
 
@@ -731,6 +734,50 @@ def tk_position_geometry(x: int, y: int) -> str:
     return f"{x:+d}{y:+d}"
 
 
+def load_saved_window_position(path: Path = WINDOW_POSITION_PATH) -> tuple[int, int] | None:
+    """Загружает сохранённую позицию панели."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return int(data["left"]), int(data["top"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def save_window_position(path: Path, x: int, y: int) -> None:
+    """Атомарно сохраняет позицию панели между запусками."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps({"left": x, "top": y}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
+def clamp_window_position_to_monitors(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    monitors: list[dict[str, int]],
+) -> tuple[int, int]:
+    """Ставит окно целиком на ближайший доступный монитор."""
+    if not monitors:
+        return x, y
+    candidates: list[tuple[int, int, int]] = []
+    for monitor in monitors:
+        min_x = monitor["left"]
+        min_y = monitor["top"]
+        max_x = max(min_x, min_x + monitor["width"] - width)
+        max_y = max(min_y, min_y + monitor["height"] - height)
+        candidate_x = max(min_x, min(x, max_x))
+        candidate_y = max(min_y, min(y, max_y))
+        distance = (candidate_x - x) ** 2 + (candidate_y - y) ** 2
+        candidates.append((distance, candidate_x, candidate_y))
+    _, candidate_x, candidate_y = min(candidates)
+    return candidate_x, candidate_y
+
+
 def place_overlay_away_from_source(
     source: dict[str, int],
     overlay_width: int,
@@ -1262,13 +1309,7 @@ class ScreenSelector:
 class TranslationOverlay:
     """Окно перевода; в Windows клики проходят сквозь него, кроме момента наведения."""
 
-    def __init__(
-        self,
-        root: tk.Tk,
-        report_capture_error: Callable[[str], None] | None = None,
-    ) -> None:
-        self.report_capture_error = report_capture_error
-        self.capture_error_reported = False
+    def __init__(self, root: tk.Tk) -> None:
         self.window = tk.Toplevel(root)
         self.window.overrideredirect(True)
         self.window.attributes("-topmost", True)
@@ -1297,7 +1338,6 @@ class TranslationOverlay:
         )
         self.label.pack(fill="both", expand=True)
         self.window.update_idletasks()
-        self._exclude_from_capture(self.window)
         for widget in (self.window, self.frame, self.label):
             widget.bind("<ButtonPress-1>", self.begin_drag)
             widget.bind("<B1-Motion>", self.drag)
@@ -1320,25 +1360,6 @@ class TranslationOverlay:
         self._render_cache: OrderedDict[
             tuple[Any, ...], Image.Image
         ] = OrderedDict()
-
-    def _exclude_from_capture(self, window: tk.Toplevel) -> None:
-        """Исключает окно перевода из поддерживаемых Windows API захвата."""
-        if not hasattr(ctypes, "windll"):
-            return
-        try:
-            set_affinity = ctypes.windll.user32.SetWindowDisplayAffinity
-            set_affinity.argtypes = [wintypes.HWND, wintypes.DWORD]
-            set_affinity.restype = wintypes.BOOL
-            hwnd = get_native_toplevel_handle(window)
-            if not set_affinity(wintypes.HWND(hwnd), 0x00000011):
-                raise ctypes.WinError()
-        except (AttributeError, OSError) as error:
-            if not self.capture_error_reported and self.report_capture_error is not None:
-                self.capture_error_reported = True
-                self.report_capture_error(
-                    "Windows не смогла исключить окно перевода из захвата "
-                    f"экрана: {error}. Будет использована маскировка перед OCR."
-                )
 
     def set_style(
         self,
@@ -1584,7 +1605,6 @@ class TranslationOverlay:
                 lambda event, item=record: self.finish_line_drag(item, event),
             )
         window.update_idletasks()
-        self._exclude_from_capture(window)
         record["handle"] = get_native_toplevel_handle(window)
         self.window_handles.append(record["handle"])
         return record
@@ -1905,7 +1925,6 @@ class ScreenTranslator:
         self.selector: ScreenSelector | None = None
         self.overlay = TranslationOverlay(
             self.root,
-            report_capture_error=lambda message: self.messages.put(("notice", message)),
         )
         self.own_window_handles = (
             get_native_toplevel_handle(self.root),
@@ -2052,6 +2071,7 @@ class ScreenTranslator:
         for widget in (chrome, chrome_title):
             widget.bind("<ButtonPress-1>", self._begin_window_drag)
             widget.bind("<B1-Motion>", self._drag_window)
+            widget.bind("<ButtonRelease-1>", self._finish_window_drag)
         subtitle_label = ttk.Label(
             panel, text="Liquid Glass · локальный OCR и перевод", style="Muted.TLabel"
         )
@@ -2059,6 +2079,7 @@ class ScreenTranslator:
         subtitle_label.grid(row=1, column=0, columnspan=2, pady=(0, 10), sticky="w")
         subtitle_label.bind("<ButtonPress-1>", self._begin_window_drag)
         subtitle_label.bind("<B1-Motion>", self._drag_window)
+        subtitle_label.bind("<ButtonRelease-1>", self._finish_window_drag)
 
         ttk.Label(panel, text="Источник захвата", style="Glass.TLabel").grid(
             row=2, column=0, sticky="w"
@@ -2238,6 +2259,25 @@ class ScreenTranslator:
         height = max(self.root.winfo_reqheight(), 620)
         self.root.geometry(f"{width}x{height}")
         self.root.minsize(width, height)
+        self.root.update_idletasks()
+        with mss.MSS() as screen:
+            monitors = [dict(monitor) for monitor in screen.monitors[1:]]
+        position = load_saved_window_position()
+        if position is None:
+            primary = monitors[0] if monitors else {"left": 0, "top": 0, "width": width, "height": height}
+            x = primary["left"] + (primary["width"] - width) // 2
+            y = primary["top"] + (primary["height"] - height) // 2
+        else:
+            x, y = position
+        x, y = clamp_window_position_to_monitors(x, y, width, height, monitors)
+        set_native_window_pos(
+            get_native_toplevel_handle(self.root),
+            x,
+            y,
+            width,
+            height,
+            0x0014,
+        )
         self.root.after(60, self._draw_glass_background)
 
     @staticmethod
@@ -2253,11 +2293,12 @@ class ScreenTranslator:
         canvas.create_polygon(points, smooth=True, **kwargs)
 
     def _begin_window_drag(self, event: tk.Event) -> None:
+        bounds = get_native_window_bounds(get_native_toplevel_handle(self.root))
         self._panel_drag_origin = (
             event.x_root,
             event.y_root,
-            self.root.winfo_x(),
-            self.root.winfo_y(),
+            bounds[0] if bounds is not None else self.root.winfo_x(),
+            bounds[1] if bounds is not None else self.root.winfo_y(),
         )
 
     def _minimize_panel(self) -> None:
@@ -2276,13 +2317,23 @@ class ScreenTranslator:
         x = window_x + event.x_root - mouse_x
         y = window_y + event.y_root - mouse_y
         set_native_window_pos(
-            get_native_toplevel_handle(self.root.winfo_id()),
+            get_native_toplevel_handle(self.root),
             x,
             y,
             self.root.winfo_width(),
             self.root.winfo_height(),
             0x0014,
         )
+
+    def _finish_window_drag(self, _event: tk.Event) -> None:
+        bounds = get_native_window_bounds(get_native_toplevel_handle(self.root))
+        self._panel_drag_origin = None
+        if bounds is None:
+            return
+        try:
+            save_window_position(WINDOW_POSITION_PATH, bounds[0], bounds[1])
+        except OSError as error:
+            self.status_var.set(f"Позиция окна не сохранена: {error}")
 
     def _draw_glass_background(self, _event: tk.Event | None = None) -> None:
         """Рисует градиент, свечения и скруглённую стеклянную карточку под содержимым."""
