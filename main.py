@@ -549,6 +549,56 @@ def normalize_ocr_text(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def _split_translation_text(text: str, max_chars: int) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for word in text.split():
+        if len(word) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(
+                word[index : index + max_chars]
+                for index in range(0, len(word), max_chars)
+            )
+        elif current and len(current) + len(word) + 1 > max_chars:
+            chunks.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def translate_with_recursion_fallback(
+    text: str,
+    translate: Callable[[str], str],
+    max_chars: int = 512,
+) -> str:
+    """Retries Argos translation in smaller chunks after a tokenizer recursion error."""
+    if not text:
+        return ""
+    pending = [text]
+    translated: list[str] = []
+    split_occurred = False
+    while pending:
+        chunk = pending.pop(0)
+        try:
+            translated.append(translate(chunk))
+        except RecursionError:
+            if len(chunk) <= 1:
+                raise
+            split_occurred = True
+            chunk_limit = min(max_chars, max(1, len(chunk) // 2))
+            parts = _split_translation_text(chunk, chunk_limit)
+            if len(parts) < 2:
+                midpoint = len(chunk) // 2
+                parts = [chunk[:midpoint], chunk[midpoint:]]
+            pending[0:0] = parts
+    return " ".join(translated) if split_occurred else translated[0]
+
+
 _FIRST_PERSON_CONTRACTIONS = {
     "you're": "I'm",
     "you've": "I've",
@@ -3055,7 +3105,22 @@ class ScreenTranslator:
 
         def translate_batch(language: str, texts: list[str]) -> list[str]:
             joined_text = "\n\n".join(texts)
-            translated = translate_text(language, joined_text)
+            try:
+                translated = translate_text(language, joined_text)
+            except RecursionError:
+                self.messages.put(
+                    (
+                        "status",
+                        "Argos не справился с глубиной обработки текста; повторяю перевод частями…",
+                    )
+                )
+                return [
+                    translate_with_recursion_fallback(
+                        text,
+                        lambda chunk: translate_text(language, chunk),
+                    )
+                    for text in texts
+                ]
             parts = translated.split("\n\n")
             if len(parts) == len(texts):
                 return [part.strip() for part in parts]

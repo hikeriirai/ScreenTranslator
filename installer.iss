@@ -1,5 +1,5 @@
 #define AppName "Screen Translator"
-#define AppVersion "1.0.2"
+#define AppVersion "1.0.3"
 #define AppPublisher "hikeriirai"
 #define AppExeName "ScreenTranslator.exe"
 

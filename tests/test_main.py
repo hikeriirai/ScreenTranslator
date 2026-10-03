@@ -362,6 +362,41 @@ class OcrTextTests(unittest.TestCase):
     def test_normalize_ocr_text_collapses_whitespace_and_case(self) -> None:
         self.assertEqual(main.normalize_ocr_text("  New\tWORLD\n "), "new world")
 
+    def test_translation_retries_recursion_error_with_smaller_text_chunks(self) -> None:
+        def translate(text: str) -> str:
+            if len(text) > 10:
+                raise RecursionError("maximum recursion depth exceeded")
+            return text.upper()
+
+        result = main.translate_with_recursion_fallback(
+            "alpha beta gamma",
+            translate,
+            max_chars=8,
+        )
+
+        self.assertEqual(result, "ALPHA BETA GAMMA")
+
+    def test_translation_fallback_splits_a_single_long_ocr_token(self) -> None:
+        def translate(text: str) -> str:
+            if len(text) > 6:
+                raise RecursionError("maximum recursion depth exceeded")
+            return text.upper()
+
+        result = main.translate_with_recursion_fallback(
+            "abcdefghij",
+            translate,
+            max_chars=4,
+        )
+
+        self.assertEqual(result, "ABCD EFGH IJ")
+
+    def test_translation_fallback_propagates_recursion_error_for_one_character(self) -> None:
+        with self.assertRaises(RecursionError):
+            main.translate_with_recursion_fallback(
+                "x",
+                lambda _text: (_ for _ in ()).throw(RecursionError("still failing")),
+            )
+
     def test_hud_labels_are_low_value_but_sentence_context_is_kept(self) -> None:
         self.assertTrue(main.is_low_value_game_text("HP 120"))
         self.assertTrue(main.is_low_value_game_text("VIT / STR"))
