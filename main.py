@@ -317,6 +317,16 @@ def prepare_cuda_runtime() -> None:
                 pass
 
 
+def is_cuda_translation_available(ctranslate2: Any, torch: Any) -> bool:
+    """Выбирает CUDA лишь когда доступны и PyTorch runtime, и устройство CTranslate2."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return ctranslate2.get_cuda_device_count() > 0
+    except RuntimeError:
+        return False
+
+
 def lower_current_thread_priority() -> None:
     """Уступает CPU-приоритет интерактивным приложениям в Windows."""
     if not hasattr(ctypes, "windll"):
@@ -2265,7 +2275,14 @@ class ScreenTranslator:
         mouse_x, mouse_y, window_x, window_y = origin
         x = window_x + event.x_root - mouse_x
         y = window_y + event.y_root - mouse_y
-        self.root.geometry(tk_position_geometry(x, y))
+        set_native_window_pos(
+            get_native_toplevel_handle(self.root.winfo_id()),
+            x,
+            y,
+            self.root.winfo_width(),
+            self.root.winfo_height(),
+            0x0014,
+        )
 
     def _draw_glass_background(self, _event: tk.Event | None = None) -> None:
         """Рисует градиент, свечения и скруглённую стеклянную карточку под содержимым."""
@@ -3013,12 +3030,10 @@ class ScreenTranslator:
                 active_mode = self.compute_mode
                 translation_models.clear()
                 direct_translation_models.clear()
-                has_cuda = False
-                if active_mode != "cpu":
-                    try:
-                        has_cuda = ctranslate2.get_cuda_device_count() > 0
-                    except RuntimeError:
-                        pass
+                has_cuda = active_mode != "cpu" and is_cuda_translation_available(
+                    ctranslate2,
+                    torch,
+                )
                 active_device = "cuda" if has_cuda else "cpu"
                 argos_settings.device = active_device
                 argos_settings.compute_type = "auto"
@@ -3030,7 +3045,10 @@ class ScreenTranslator:
                 argos_translate.get_installed_languages.cache_clear()
                 if active_mode == "cuda" and not has_cuda:
                     self.messages.put(
-                        ("status", "CUDA не обнаружена; перевод будет выполняться на CPU.")
+                        (
+                            "status",
+                            "CUDA недоступна в PyTorch; перевод будет выполняться на CPU.",
+                        )
                     )
                 elif active_mode == "auto" and not has_cuda:
                     self.messages.put(("status", "Авто: перевод выполняется на CPU."))

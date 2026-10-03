@@ -161,11 +161,13 @@ class OcrTextTests(unittest.TestCase):
 
         set_thread_priority.assert_called_once_with(123, -1)
 
-    def test_main_window_drag_keeps_pointer_offset(self) -> None:
+    def test_main_window_drag_crosses_virtual_desktop_monitors(self) -> None:
         root = SimpleNamespace(
+            winfo_id=lambda: 456,
             winfo_x=lambda: 100,
             winfo_y=lambda: 120,
-            geometry=Mock(),
+            winfo_width=lambda: 500,
+            winfo_height=lambda: 620,
         )
         app = SimpleNamespace(root=root)
 
@@ -173,12 +175,30 @@ class OcrTextTests(unittest.TestCase):
             app,
             SimpleNamespace(x_root=140, y_root=160),
         )
-        main.ScreenTranslator._drag_window(
-            app,
-            SimpleNamespace(x_root=190, y_root=210),
-        )
+        with (
+            patch.object(main, "get_native_toplevel_handle", return_value=456),
+            patch.object(main, "set_native_window_pos") as set_position,
+        ):
+            main.ScreenTranslator._drag_window(
+                app,
+                SimpleNamespace(x_root=-1100, y_root=250),
+            )
 
-        root.geometry.assert_called_once_with("+150+170")
+        set_position.assert_called_once_with(456, -1140, 210, 500, 620, 0x0014)
+
+    def test_cuda_detection_rejects_ct2_device_without_torch_cuda_runtime(self) -> None:
+        ctranslate2 = SimpleNamespace(get_cuda_device_count=Mock(return_value=1))
+        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=Mock(return_value=False)))
+
+        self.assertFalse(main.is_cuda_translation_available(ctranslate2, torch))
+        ctranslate2.get_cuda_device_count.assert_not_called()
+
+    def test_cuda_detection_requires_ct2_device_and_torch_runtime(self) -> None:
+        ctranslate2 = SimpleNamespace(get_cuda_device_count=Mock(return_value=1))
+        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=Mock(return_value=True)))
+
+        self.assertTrue(main.is_cuda_translation_available(ctranslate2, torch))
+        ctranslate2.get_cuda_device_count.assert_called_once_with()
 
     def test_supported_source_languages_are_explicit_and_limited(self) -> None:
         self.assertEqual(main.LANGUAGES, {"Английский": "en", "Японский": "ja"})

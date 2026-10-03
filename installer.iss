@@ -1,5 +1,5 @@
 #define AppName "Screen Translator"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define AppPublisher "hikeriirai"
 #define AppExeName "ScreenTranslator.exe"
 
@@ -12,8 +12,8 @@ DefaultDirName={localappdata}\Programs\ScreenTranslator
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=dist
 OutputBaseFilename=ScreenTranslator-Setup
 Compression=lzma2/normal
