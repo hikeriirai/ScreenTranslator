@@ -260,6 +260,25 @@ class OcrTextTests(unittest.TestCase):
         self.assertFalse(main.is_cuda_translation_available(ctranslate2, torch))
         ctranslate2.get_cuda_device_count.assert_not_called()
 
+    def test_cuda_detection_falls_back_if_torch_cuda_probe_raises(self) -> None:
+        ctranslate2 = SimpleNamespace(get_cuda_device_count=Mock(return_value=1))
+        torch = SimpleNamespace(
+            cuda=SimpleNamespace(
+                is_available=Mock(side_effect=RuntimeError("CUDA runtime unavailable"))
+            )
+        )
+
+        self.assertFalse(main.is_cuda_translation_available(ctranslate2, torch))
+        ctranslate2.get_cuda_device_count.assert_not_called()
+
+    def test_cuda_detection_falls_back_if_ctranslate2_probe_raises(self) -> None:
+        ctranslate2 = SimpleNamespace(
+            get_cuda_device_count=Mock(side_effect=OSError("CUDA DLL load failed"))
+        )
+        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=Mock(return_value=True)))
+
+        self.assertFalse(main.is_cuda_translation_available(ctranslate2, torch))
+
     def test_cuda_detection_requires_ct2_device_and_torch_runtime(self) -> None:
         ctranslate2 = SimpleNamespace(get_cuda_device_count=Mock(return_value=1))
         torch = SimpleNamespace(cuda=SimpleNamespace(is_available=Mock(return_value=True)))

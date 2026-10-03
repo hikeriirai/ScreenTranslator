@@ -203,13 +203,29 @@ def packaged_self_test() -> None:
         )
     japanese_to_english = by_code["ja"].get_translation(by_code["en"])
     english_to_russian = by_code["en"].get_translation(by_code["ru"])
-    if japanese_to_english is None or english_to_russian is None:
+    japanese_to_russian = by_code["ja"].get_translation(by_code["ru"])
+    if (
+        japanese_to_english is None
+        or english_to_russian is None
+        or japanese_to_russian is None
+    ):
         raise RuntimeError("Bundled Argos translation path ja-en-ru is unavailable")
     intermediate = japanese_to_english.translate("こんにちは")
-    translated = english_to_russian.translate("I grab the handle.")
-    if not intermediate.strip() or not translated.strip():
+    translated = english_to_russian.translate(
+        "My name is Ann. I am a pupil. I go to school. "
+        "When I come home, I like to read. My hobby is reading."
+    )
+    japanese_result = japanese_to_russian.translate("こんにちは")
+    if (
+        not intermediate.strip()
+        or not translated.strip()
+        or not japanese_result.strip()
+    ):
         raise RuntimeError("Bundled Argos model returned an empty translation")
-    print(f"Packaged OCR models loaded; Argos ja-en-ru works: {translated}")
+    print(
+        "Packaged OCR models loaded; Argos en-ru and ja-en-ru paths work: "
+        f"{translated}"
+    )
 
 
 class OCRContextBuffer:
@@ -322,11 +338,11 @@ def prepare_cuda_runtime() -> None:
 
 def is_cuda_translation_available(ctranslate2: Any, torch: Any) -> bool:
     """Выбирает CUDA лишь когда доступны и PyTorch runtime, и устройство CTranslate2."""
-    if not torch.cuda.is_available():
-        return False
     try:
+        if not torch.cuda.is_available():
+            return False
         return ctranslate2.get_cuda_device_count() > 0
-    except RuntimeError:
+    except Exception:
         return False
 
 
@@ -2956,6 +2972,7 @@ class ScreenTranslator:
 
     def _translation_loop(self) -> None:
         """Устанавливает модели Argos и переводит локально на выбранном устройстве."""
+        self.messages.put(("status", "Инициализация Argos Translate…"))
         try:
             prepare_cuda_runtime()
             bundled_argos_models = application_directory() / "models" / "argos"
@@ -2980,11 +2997,18 @@ class ScreenTranslator:
         active_mode: str | None = None
         active_device = "cpu"
         default_chunk_type = argos_settings.chunk_type
-        installed_pairs = {
-            (language.code, translation.to_lang.code)
-            for language in argos_translate.get_installed_languages()
-            for translation in language.translations_to
-        }
+        try:
+            default_chunk_type = argos_settings.chunk_type
+            installed_pairs = {
+                (language.code, translation.to_lang.code)
+                for language in argos_translate.get_installed_languages()
+                for translation in language.translations_to
+            }
+        except Exception as error:
+            self.messages.put(
+                ("notice", f"Не удалось обнаружить модели Argos: {error}")
+            )
+            return
 
         def get_translation_model(language: str) -> Any:
             nonlocal available_packages
@@ -3047,9 +3071,24 @@ class ScreenTranslator:
 
         def translate_intermediate_english(text: str) -> str:
             nonlocal active_device
+            self.messages.put(
+                ("status", "Подготовка промежуточного перевода японского текста…")
+            )
             get_translation_model("ja")
+
+            def translate_chunks() -> str:
+                return translate_with_recursion_fallback(
+                    text,
+                    lambda chunk: get_direct_translation_model("ja", "en")
+                    .translate(chunk)
+                    .strip(),
+                )
+
+            self.messages.put(("status", "Перевод японского текста в английский…"))
             try:
-                return get_direct_translation_model("ja", "en").translate(text).strip()
+                return translate_chunks()
+            except RecursionError:
+                raise
             except Exception:
                 if active_device != "cuda":
                     raise
@@ -3059,7 +3098,7 @@ class ScreenTranslator:
                 direct_translation_models.clear()
                 argos_translate.get_installed_languages.cache_clear()
                 get_translation_model("ja")
-                translated = get_direct_translation_model("ja", "en").translate(text).strip()
+                translated = translate_chunks()
                 self.messages.put(
                     (
                         "status",
@@ -3087,6 +3126,8 @@ class ScreenTranslator:
             nonlocal active_device
             try:
                 return get_translation_model(language).translate(text).strip()
+            except RecursionError:
+                raise
             except Exception:
                 if active_device != "cuda":
                     raise
@@ -3105,6 +3146,9 @@ class ScreenTranslator:
 
         def translate_batch(language: str, texts: list[str]) -> list[str]:
             joined_text = "\n\n".join(texts)
+            self.messages.put(
+                ("status", f"Перевод текста с {language} на русский…")
+            )
             try:
                 translated = translate_text(language, joined_text)
             except RecursionError:
@@ -3127,7 +3171,12 @@ class ScreenTranslator:
             self.messages.put(
                 ("status", "Модель изменила разбиение строк; перевожу отдельно…")
             )
-            return [translate_text(language, text) for text in texts]
+            outputs = [translate_text(language, text) for text in texts]
+            if len(outputs) != len(texts):
+                raise RuntimeError(
+                    f"Argos вернул {len(outputs)} переводов для {len(texts)} строк"
+                )
+            return outputs
 
         while not self.stop_event.is_set():
             try:
@@ -3236,9 +3285,16 @@ class ScreenTranslator:
                         )
                     )
             except Exception as error:
-                detail = str(error).strip().splitlines()[0] if str(error).strip() else type(error).__name__
+                detail = (
+                    str(error).strip().splitlines()[0]
+                    if str(error).strip()
+                    else type(error).__name__
+                )
                 self.messages.put(
-                    ("notice", f"Перевод не выполнен: {detail[:110]}")
+                    (
+                        "notice",
+                        f"Перевод не выполнен ({type(error).__name__}): {detail[:110]}",
+                    )
                 )
 
     def _process_messages(self) -> None:
