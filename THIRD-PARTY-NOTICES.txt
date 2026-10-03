@@ -1,0 +1,19 @@
+Screen Translator bundles third-party software and language models.
+
+EasyOCR
+https://github.com/JaidedAI/EasyOCR
+The EasyOCR project is distributed under the MIT License. The application
+installer contains the English, Japanese, and CRAFT model weights used by
+EasyOCR. See the upstream project for current license and attribution terms.
+
+Argos Translate and language packages
+https://github.com/argosopentech/argos-translate
+The Argos Japanese-to-English and English-to-Russian packages are included
+with their upstream metadata and README files. Those files identify model
+provenance, corpora, and their respective notices. Review each package's
+README before reusing or redistributing its model data separately.
+
+Other bundled components include PyTorch, torchvision, CTranslate2, OpenCV,
+NumPy, Pillow, mss, keyboard, and their dependencies. Their respective
+copyright and license notices are provided by the upstream projects and
+package distributions.
