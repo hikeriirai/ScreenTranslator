@@ -90,6 +90,11 @@ class OcrTextTests(unittest.TestCase):
         self.assertEqual(main.ocr_context_quiet_period(0.8), 1.2)
         self.assertEqual(main.ocr_context_quiet_period(1.5), 1.2)
 
+    def test_context_clear_period_allows_for_missed_ocr_frames(self) -> None:
+        self.assertEqual(main.ocr_context_clear_period(0.2), 2.0)
+        self.assertEqual(main.ocr_context_clear_period(0.8), 2.0)
+        self.assertEqual(main.ocr_context_clear_period(1.5), 3.0)
+
     def test_translation_overlay_prefers_space_outside_source_text(self) -> None:
         source = {"left": 500, "top": 400, "width": 500, "height": 100}
         monitor = {"left": 0, "top": 0, "width": 1920, "height": 1080}
@@ -347,6 +352,28 @@ class OcrTextTests(unittest.TestCase):
 
         self.assertIsNone(buffer.poll(2.0))
 
+    def test_context_buffer_keeps_translation_through_brief_ocr_miss(self) -> None:
+        buffer = main.OCRContextBuffer(
+            quiet_period=0.5,
+            clear_period=main.ocr_context_clear_period(0.8),
+        )
+        text = [
+            {
+                "text": "Same sentence.",
+                "language": "en",
+                "bounds": {"left": 10, "top": 10, "width": 100, "height": 20},
+            }
+        ]
+
+        buffer.observe(text, 0.0)
+        self.assertEqual(buffer.poll(0.5), text)
+        buffer.observe([], 1.0)
+        self.assertIsNone(buffer.poll(2.9))
+
+        buffer.observe(text, 3.0)
+        self.assertIsNone(buffer.poll(3.6))
+        self.assertIsNone(buffer.poll(4.0))
+
     def test_context_buffer_reset_allows_reselected_same_text(self) -> None:
         buffer = main.OCRContextBuffer(quiet_period=0.5, clear_period=1.0)
         same_text = [
@@ -408,6 +435,20 @@ class OcrTextTests(unittest.TestCase):
         )
 
         self.assertEqual(result, "ABCD EFGH IJ")
+
+    def test_translation_proactively_splits_long_japanese_at_sentence_boundaries(self) -> None:
+        source_parts = ["第一文です。", "第二文です。", "第三文です。"]
+        source = "".join(source_parts)
+        translated_chunks: list[str] = []
+
+        result = main.translate_with_recursion_fallback(
+            source,
+            lambda chunk: translated_chunks.append(chunk) or chunk,
+            max_chars=8,
+        )
+
+        self.assertEqual(translated_chunks, source_parts)
+        self.assertEqual(result, " ".join(source_parts))
 
     def test_translation_fallback_propagates_recursion_error_for_one_character(self) -> None:
         with self.assertRaises(RecursionError):

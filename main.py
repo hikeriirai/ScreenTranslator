@@ -104,6 +104,9 @@ ARGOS_PATHS = {
 OCR_CONTEXT_QUIET_PERIOD = 0.65
 OCR_CONTEXT_MAX_QUIET_PERIOD = 1.2
 OCR_CONTEXT_CLEAR_PERIOD = 1.2
+OCR_CONTEXT_MIN_CLEAR_PERIOD = 2.0
+OCR_CONTEXT_CLEAR_SCAN_MULTIPLIER = 2.0
+MAX_TRANSLATION_CHUNK_CHARS = 256
 OVERLAY_RESIZE_RENDER_DELAY_MS = 64
 COMPUTE_MODES = {"Авто": "auto", "CPU": "cpu", "GPU": "cuda"}
 TRANSLATION_MODES = {"Обычный": "normal", "Визуальные новеллы": "visual_novel"}
@@ -573,10 +576,18 @@ def _split_translation_text(text: str, max_chars: int) -> list[str]:
             if current:
                 chunks.append(current)
                 current = ""
-            chunks.extend(
-                word[index : index + max_chars]
-                for index in range(0, len(word), max_chars)
-            )
+            start = 0
+            while start < len(word):
+                end = min(start + max_chars, len(word))
+                if end < len(word):
+                    boundary = max(
+                        word.rfind(mark, start, end)
+                        for mark in "。！？；.!?;"
+                    )
+                    if boundary >= start + max_chars // 2:
+                        end = boundary + 1
+                chunks.append(word[start:end])
+                start = end
         elif current and len(current) + len(word) + 1 > max_chars:
             chunks.append(current)
             current = word
@@ -592,12 +603,16 @@ def translate_with_recursion_fallback(
     translate: Callable[[str], str],
     max_chars: int = 512,
 ) -> str:
-    """Retries Argos translation in smaller chunks after a tokenizer recursion error."""
+    """Translates bounded chunks to avoid silent model truncation and retries recursion errors."""
     if not text:
         return ""
-    pending = [text]
+    pending = (
+        _split_translation_text(text, max_chars)
+        if len(text) > max_chars
+        else [text]
+    )
     translated: list[str] = []
-    split_occurred = False
+    split_occurred = len(pending) > 1
     while pending:
         chunk = pending.pop(0)
         try:
@@ -792,6 +807,14 @@ def ocr_context_quiet_period(scan_interval: float) -> float:
     return min(
         OCR_CONTEXT_MAX_QUIET_PERIOD,
         max(OCR_CONTEXT_QUIET_PERIOD, scan_interval * 1.5),
+    )
+
+
+def ocr_context_clear_period(scan_interval: float) -> float:
+    """Не скрывает перевод из-за одного или двух пропущенных OCR-кадров."""
+    return max(
+        OCR_CONTEXT_MIN_CLEAR_PERIOD,
+        scan_interval * OCR_CONTEXT_CLEAR_SCAN_MULTIPLIER,
     )
 
 
@@ -2808,6 +2831,7 @@ class ScreenTranslator:
         next_ocr_at = 0.0
         while not self.stop_event.is_set():
             context_buffer.quiet_period = ocr_context_quiet_period(self.scan_interval)
+            context_buffer.clear_period = ocr_context_clear_period(self.scan_interval)
             if self.context_reset_event.is_set():
                 context_buffer.reset()
                 self.context_reset_event.clear()
@@ -3082,6 +3106,7 @@ class ScreenTranslator:
                     lambda chunk: get_direct_translation_model("ja", "en")
                     .translate(chunk)
                     .strip(),
+                    max_chars=MAX_TRANSLATION_CHUNK_CHARS,
                 )
 
             self.messages.put(("status", "Перевод японского текста в английский…"))
@@ -3124,8 +3149,18 @@ class ScreenTranslator:
 
         def translate_text(language: str, text: str) -> str:
             nonlocal active_device
+
+            def translate_chunks() -> str:
+                return translate_with_recursion_fallback(
+                    text,
+                    lambda chunk: get_translation_model(language)
+                    .translate(chunk)
+                    .strip(),
+                    max_chars=MAX_TRANSLATION_CHUNK_CHARS,
+                )
+
             try:
-                return get_translation_model(language).translate(text).strip()
+                return translate_chunks()
             except RecursionError:
                 raise
             except Exception:
@@ -3135,7 +3170,7 @@ class ScreenTranslator:
                 argos_settings.device = "cpu"
                 translation_models.clear()
                 argos_translate.get_installed_languages.cache_clear()
-                translated = get_translation_model(language).translate(text).strip()
+                translated = translate_chunks()
                 self.messages.put(
                     (
                         "status",
@@ -3149,6 +3184,32 @@ class ScreenTranslator:
             self.messages.put(
                 ("status", f"Перевод текста с {language} на русский…")
             )
+            if len(texts) > 1 and len(joined_text) > 256:
+                self.messages.put(
+                    ("status", "Длинный текст переводится последовательными частями…")
+                )
+                batches: list[list[str]] = []
+                current_batch: list[str] = []
+                current_length = 0
+                for text in texts:
+                    separator_length = 2 if current_batch else 0
+                    if (
+                        current_batch
+                        and current_length + separator_length + len(text) > 256
+                    ):
+                        batches.append(current_batch)
+                        current_batch = []
+                        current_length = 0
+                        separator_length = 0
+                    current_batch.append(text)
+                    current_length += separator_length + len(text)
+                if current_batch:
+                    batches.append(current_batch)
+                return [
+                    translated
+                    for batch in batches
+                    for translated in translate_batch(language, batch)
+                ]
             try:
                 translated = translate_text(language, joined_text)
             except RecursionError:
